@@ -23,23 +23,10 @@ from omintel.object_constraints.schemas import (
 )
 
 
-def _write_l0(root: Path, n_frames: int = 10, size: int = 64, fps: float = 30.0):
-    media_facts = {
-        "source": {"sha256": "a" * 64},
-        "video_stream": {
-            "width": size, "height": size,
-            "display_width": size, "display_height": size, "rotation_deg": 0,
-        },
-        "frame_timeline": {"likely_variable_frame_rate": False},
-    }
-    (root / "media_facts.json").write_text(json.dumps(media_facts), encoding="utf-8")
-    frames_path = root / "frames.csv"
-    with frames_path.open("w", encoding="utf-8-sig", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["frame_no", "pts_time_s"])
-        for i in range(n_frames):
-            writer.writerow([i, i / fps])
-    return root / "media_facts.json", frames_path
+import sys
+from pathlib import Path as _P
+sys.path.insert(0, str(_P(__file__).resolve().parent))
+from l0_fixture import write_l0 as _write_l0  # noqa: E402
 
 
 @unittest.skipUnless(HAS_CV2, "opencv-python not installed")
@@ -57,8 +44,8 @@ class ClosedLoopTest(unittest.TestCase):
                 media_facts=media_facts,
                 frames_csv=frames_csv,
                 out_dir=out,
-                object_id="shoe_01",
-                class_name="sneaker",
+                object_id="obj_01",
+                class_name="person",
                 pts_start=0.0,
                 pts_end=9 / 30.0,
                 bbox=BBox(0.25, 0.25, 0.75, 0.75),
