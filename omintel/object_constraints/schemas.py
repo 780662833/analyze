@@ -77,6 +77,9 @@ def build_object_tracks(
     detector: dict[str, Any] | None = None,
     segmenter: dict[str, Any] | None = None,
     tracker: dict[str, Any] | None = None,
+    mask_source: str | None = None,
+    mask_precision: str | None = None,
+    initialization_file: str | None = None,
 ) -> dict[str, Any]:
     """Build a canonical ``object_tracks.json`` document.
 
@@ -107,6 +110,9 @@ def build_object_tracks(
             "object_id": object_id,
             "class": class_name,
             "reference_asset_id": reference_asset_id,
+            # generic analysis: the target is any user-specified object class
+            # (free-form text prompt), not bound to a specific product category
+            "class_scope": "generic_any_class",
             "identity_model": "single_initial_prompt",
             "identity_note": (
                 "v1 treats the object as a single identity seeded by one "
@@ -135,6 +141,12 @@ def build_object_tracks(
             "mask_coordinate_space": COORDINATE_SPACE,
             "mask_dir": mask_dir,
             "mask_index_csv": mask_index_csv,
+            # how masks were produced: a rectangular placeholder derived from
+            # the tracked bbox is NOT a real object outline; downstream must
+            # treat it as an interface-validation artifact only
+            "mask_source": mask_source or "bbox_rectangle_placeholder",
+            "mask_precision": mask_precision or "rectangular_approximation",
+            "initialization_file": initialization_file,
             "detection_source": det.get("backend"),
             "segmentation_source": seg.get("backend"),
             "motion_source": trk.get("backend"),
@@ -260,6 +272,13 @@ def validate_object_tracks(doc: dict[str, Any]) -> None:
         _require(tracks.get(key), f"tracks.{key} must reference a sidecar file/dir")
     _require("frames" not in tracks and "mask_array" not in tracks,
              "tracks must remain index-only; per-frame data lives in sidecar files")
+    # a rectangular placeholder mask must never be mistaken for a real object
+    # outline: the producing source is an explicit, required declaration
+    _require(bool(tracks.get("mask_source")),
+             "tracks.mask_source must declare how masks were produced")
+    _require(tracks.get("mask_source") != "segmentation_model"
+             or tracks.get("mask_precision") == "object_outline",
+             "model-produced masks must declare object_outline precision")
 
 
 def validate_object_constraints(doc: dict[str, Any]) -> None:
