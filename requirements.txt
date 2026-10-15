@@ -1,0 +1,7 @@
+# Required for the optional OpenCV fallback and evidence frame extraction.
+opencv-python>=4.8
+# Required for the formal first detector (A route).
+scenedetect[opencv]>=0.7,<0.8
+# Optional: write frames.parquet in a future extension; CSV is always emitted.
+# pandas>=2.0
+# pyarrow>=14.0
