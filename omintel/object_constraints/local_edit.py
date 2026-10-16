@@ -50,6 +50,24 @@ NONPASS_DECISIONS = ("skip", "fail")
 #: before calibration, which would defeat the purpose of this consumer test.
 UNRELIABLE_MARKERS = ("tracking lost", "suspected drift")
 
+#: normalized bbox coordinates outside [0, 1] cannot be interpreted in the
+#: contract coordinate space (normalized top-left origin). Such rows are
+#: rejected up front rather than silently clamped to the frame edge -- a
+#: corrupt track must not smuggle an edit into the preserve region.
+_COORD_EPS = 1e-6
+
+
+def _validate_bbox(box: Any) -> tuple[float, float, float, float]:
+    x0, y0, x1, y1 = (float(v) for v in box[:4])
+    bad = [v for v in (x0, y0, x1, y1)
+           if not (-_COORD_EPS <= v <= 1.0 + _COORD_EPS)]
+    if bad:
+        raise ValueError(
+            f"bbox has normalized coordinates outside [0, 1]: {bad} "
+            f"(box={[x0, y0, x1, y1]}); refusing to edit on a corrupt track"
+        )
+    return x0, y0, x1, y1
+
 
 def _frame_reliable(row: dict[str, Any] | None) -> bool:
     """True when the frame's gate_reason records no tracking-lost/drift marker."""
@@ -70,11 +88,21 @@ def _load_tracks(art: Path) -> dict[str, Any]:
         raise ValueError(
             f"bbox.npz has {len(bboxes)} rows but window spans {len(frame_nos)} frames"
         )
+    # contract invariant: every bbox row must live in the normalized [0, 1]
+    # coordinate space *before* any consumer touches a pixel. A corrupt track
+    # (out-of-range coords from a bad tracker or hand-edited npz) is rejected
+    # here so it can never be silently clamped into an edit region.
+    for fn, box in zip(frame_nos, bboxes):
+        try:
+            _validate_bbox(box)
+        except ValueError as exc:
+            raise ValueError(f"frame {fn}: {exc}") from exc
     return {
         "tracks": tracks,
         "frame_nos": frame_nos,
         "bboxes": bboxes,
         "object_id": tracks["object"]["object_id"],
+        "shot_id": tracks.get("shot_id"),
     }
 
 
@@ -117,6 +145,18 @@ def composite_local_overlay(
     art = Path(artifacts_dir)
     info = _load_tracks(art)
     tracks, frame_nos, bboxes = info["tracks"], info["frame_nos"], info["bboxes"]
+    # design rule: a shot cut ends the current tracking segment; identity is
+    # NOT carried across cuts. A multi-shot window therefore has no single
+    # valid tracked object -- refuse the edit instead of pasting one track's
+    # boxes onto footage from another shot. (Per-segment analysis must be run
+    # with shot-scoped windows; see io.resolve_window / shots_csv.)
+    if info["shot_id"] is None:
+        raise ValueError(
+            "object_tracks.json carries shot_id=null: the tracked window is "
+            "not bound to a single shot, so continuity of object identity "
+            "across possible cuts cannot be audited. Refusing to composite; "
+            "re-run analysis per shot segment (shot_id + shots_csv)."
+        )
     quality = load_quality_rows(art / tracks["per_frame_quality_csv"])
     tb = tracks["time_base"]
     start_fn, end_fn = frame_nos[0], frame_nos[-1]
