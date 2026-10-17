@@ -12,6 +12,7 @@ Proves the constraint contracts are consumable *without modification*:
 from __future__ import annotations
 
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,16 +63,18 @@ def _decode_all(path: Path) -> list[np.ndarray]:
     return frames
 
 
-def _run_loop(tmp: Path) -> dict:
+def _run_loop(tmp: Path, *, shot_id: str | None = "shot_01") -> dict:
     src = tmp / "src.avi"
     _write_moving_block_video(src)
     media_facts, frames_csv = _write_l0(tmp, n_frames=N_FRAMES)
     gray = [cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY) for fr in _decode_all(src)]
     res = run_frames(
         gray, media_facts=media_facts, frames_csv=frames_csv, out_dir=tmp / "art",
-        object_id="obj_01", class_name="person",
+        object_id="obj_01", class_name="person", shot_id=shot_id,
+        shots_csv=(tmp / "shots.csv") if shot_id is not None else None,
         bbox=BBox(0.125, 0.375, 0.375, 0.625), init_frame_no=0,
-        pts_start=0.0, pts_end=(N_FRAMES - 1) / 30.0,
+        pts_start=None if shot_id is not None else 0.0,
+        pts_end=None if shot_id is not None else (N_FRAMES - 1) / 30.0,
         tracker=OpenCVLucasKanadeTracker(), track_box_updates=True,
     )
     return {"src": src, "art": tmp / "art", "res": res, "frames_csv": frames_csv}
@@ -79,7 +82,8 @@ def _run_loop(tmp: Path) -> dict:
 
 def _mark_frame_unreliable(quality_csv: Path, frame_no: int) -> None:
     p = Path(quality_csv)
-    rows = list(csv.DictReader(p.open(encoding="utf-8-sig")))
+    with p.open(encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
     fields = list(rows[0].keys())
     for r in rows:
         if int(r["frame_no"]) == frame_no:
@@ -162,6 +166,53 @@ class LocalEditRegressionTest(unittest.TestCase):
             writer.release()
             with self.assertRaises(AssertionError):
                 verify_local_edit_output(env["src"], leaked, env["art"])
+
+    def test_out_of_range_bbox_rejected_before_any_pixel_touch(self):
+        """Negative case 1: corrupt track with coords outside [0, 1].
+
+        A bbox row whose normalized coordinates leave [0, 1] cannot be
+        interpreted in the contract coordinate space. The consumer must
+        refuse up front -- no output file, no silent clamping to the frame
+        edge (clamping would smuggle an edit into the preserve region).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _run_loop(Path(tmp))
+            npz = env["art"] / "tracks" / "bbox.npz"
+            bboxes = np.load(npz)["bboxes"].copy()
+            bboxes[4] = [-0.05, 0.375, 0.375, 0.625]  # x_min below 0
+            np.savez(npz, bboxes=bboxes)
+            out = Path(tmp) / "bad.mkv"
+            with self.assertRaises(ValueError) as ctx:
+                composite_local_overlay(env["src"], env["art"], out)
+            self.assertIn("outside [0, 1]", str(ctx.exception))
+            self.assertIn("frame 4", str(ctx.exception))
+            # rejection happened *before* compositing: nothing was written
+            self.assertFalse(out.exists())
+            # verifier shares the same guard: a corrupt track is not auditable
+            with self.assertRaises(ValueError):
+                verify_local_edit_output(env["src"], env["src"], env["art"])
+
+    def test_cross_shot_identity_continuation_refused(self):
+        """Negative case 2: one track must not carry identity across a cut.
+
+        Design rule: a shot boundary ends the tracking segment; downstream
+        editing re-initializes per shot. An artifact set produced without a
+        shot binding (shot_id=null -- e.g. a PTS window spanning a cut) has
+        no auditable single-shot identity, so the compositor refuses it
+        instead of pasting one shot's boxes onto another shot's footage.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _run_loop(Path(tmp), shot_id=None)  # unbound window
+            tracks_path = env["art"] / "object_tracks.json"
+            doc = json.loads(tracks_path.read_text(encoding="utf-8"))
+            self.assertIsNone(doc["shot_id"])  # precondition: no shot binding
+            out = Path(tmp) / "cross.mkv"
+            with self.assertRaises(ValueError) as ctx:
+                composite_local_overlay(env["src"], env["art"], out)
+            msg = str(ctx.exception)
+            self.assertIn("shot_id=null", msg)
+            self.assertIn("Refusing to composite", msg)
+            self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":  # pragma: no cover
