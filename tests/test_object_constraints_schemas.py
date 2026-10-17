@@ -22,9 +22,9 @@ def _sample_tracks() -> dict:
     return build_object_tracks(
         video_id="3f2a9c1d8b7e6a55",
         source_sha256="a" * 64,
-        object_id="shoe_01",
+        object_id="obj_01",
         shot_id="S0004",
-        class_name="sneaker",
+        class_name="person",
         coded_size=(1920, 1080),
         display_size=(1920, 1080),
         rotation_deg=0,
@@ -43,7 +43,7 @@ def _sample_constraints() -> dict:
     return build_object_constraints(
         video_id="3f2a9c1d8b7e6a55",
         source_sha256="a" * 64,
-        object_id="shoe_01",
+        object_id="obj_01",
         coded_size=(1920, 1080),
         display_size=(1920, 1080),
         rotation_deg=0,

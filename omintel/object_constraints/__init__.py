@@ -34,6 +34,7 @@ from .detector import BBox, Detector, StaticBoxDetector
 from .segmenter import BoxMaskSegmenter, Segmenter, StaticBoxSegmenter
 from .tracker import NullPointTracker, OpenCVLucasKanadeTracker, PointTracker
 from .quality import aggregate_gate, assess_frame, assess_window
+from .preview import render_preview, render_preview_from_artifacts
 from .analyze import run_analysis, run_frames, run_video
 from .video_io import decode_window, video_info
 
@@ -66,6 +67,10 @@ __all__ = [
     "aggregate_gate",
     "assess_frame",
     "assess_window",
+    "render_preview",
+    "composite_local_overlay",
+    "verify_local_edit_output",
+    "render_preview_from_artifacts",
     "run_analysis",
     "run_frames",
     "run_video",

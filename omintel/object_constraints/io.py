@@ -129,6 +129,8 @@ def build_tracks_from_l0(
     detector: dict[str, Any] | None = None,
     segmenter: dict[str, Any] | None = None,
     tracker: dict[str, Any] | None = None,
+    mask_source: str | None = None,
+    initialization_file: str | None = None,
 ) -> dict[str, Any]:
     """Build ``object_tracks.json`` directly from existing L0 artifacts."""
     l0 = load_l0(media_facts_path)
@@ -159,6 +161,8 @@ def build_tracks_from_l0(
         detector=detector,
         segmenter=segmenter,
         tracker=tracker,
+        mask_source=mask_source,
+        initialization_file=initialization_file,
     )
 
 

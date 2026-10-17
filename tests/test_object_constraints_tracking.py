@@ -40,6 +40,37 @@ class LucasKanadeTrackerTest(unittest.TestCase):
         self.assertGreater(pts[-1][0], pts[0][0])
         self.assertTrue(all(v == 1.0 for v in result["visibility"][0]))
 
+    def test_forward_backward_error_small_without_drift(self):
+        frames = _moving_dot_frames()
+        result = OpenCVLucasKanadeTracker().track(frames, [[16.0, 20.0]], (0, len(frames) - 1))
+        fb = result["fb_error"][0]
+        self.assertEqual(len(fb), len(frames))
+        # consistent tracking -> round-trip residual stays under tolerance
+        self.assertTrue(all(v <= result["fb_tolerance_px"] for v in fb))
+
+    def test_lost_frames_flagged_in_quality_rows(self):
+        # moving dot for the first half, random-noise scene after (simulated cut)
+        frames = []
+        for i in range(20):
+            if i < 10:
+                img = np.zeros((64, 64), dtype=np.uint8)
+                x, y = 16 + i * 3, 20
+                img[y - 1:y + 2, x - 1:x + 2] = 255
+            else:
+                img = np.random.RandomState(i).randint(0, 255, (64, 64)).astype(np.uint8)
+            frames.append(img)
+        result = OpenCVLucasKanadeTracker().track(frames, [[16.0, 20.0]], (0, len(frames) - 1))
+        self.assertTrue(any(v == 0.0 for v in result["visibility"][0]))
+
+        from omintel.object_constraints.quality import assess_window
+
+        masks = [np.ones((64, 64), dtype=np.uint8) * 255] * len(frames)
+        rows = assess_window(list(range(len(frames))), [i / 30.0 for i in range(len(frames))],
+                             masks, result)
+        lost_reasons = [r["gate_reason"] for r in rows if "tracking lost" in r["gate_reason"]]
+        self.assertTrue(lost_reasons, "lost-tracking frames must surface a REVIEW reason")
+        self.assertTrue(all(r["gate"] == "REVIEW" for r in rows))
+
     def test_rejects_invalid_time_range(self):
         tracker = OpenCVLucasKanadeTracker()
         with self.assertRaises(ValueError):
