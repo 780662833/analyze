@@ -8,11 +8,20 @@ events.json.
 
 v1.0.0 criteria contract (frozen in review, revisions R1-R4 applied):
 
-  Peak eligibility (R1):
+  Peak eligibility (R1, frozen ruling 1 -- SINGLE prominence formula):
     * absolute floor: mean_abs_diff >= abs_threshold (params, provenance);
-    * local prominence: value > max(neighbors) * prominence_ratio AND
-      value > median(neighbors), where neighbors are the valid, UNSUPPRESSED
-      pairs within +/- window_frames -- the plateau itself is EXCLUDED;
+    * local prominence (AUTHORITATIVE FORMULA, strict >): the plateau value
+      must satisfy BOTH
+          v > max(N) * prominence_ratio   AND   v > median(N)
+      where N = the valid, UNSUPPRESSED pairs within +/- window_frames --
+      the whole plateau is EXCLUDED from N.  The median clause compares
+      against the RAW median (no ratio scaling).  A plateau whose equal
+      neighbors reach its own height therefore LOSES prominence
+      (v > v * r is false) -- that is intended behaviour, e.g. it keeps a
+      constant-translation platform peak-free apart from the onset edge.
+      ``prominence_max_ratio`` is DEPRECATED / INACTIVE: it does not
+      participate in peak selection and is stripped from the ACTIVE
+      parameter set echoed into provenance;
     * flat top: consecutive equal-valued qualifying pairs form ONE plateau
       whose representative index is start + (len-1)//2 (LEFT-MIDDLE for even
       lengths) -- deterministic regardless of traversal order;
@@ -22,21 +31,46 @@ v1.0.0 criteria contract (frozen in review, revisions R1-R4 applied):
       peak-INELIGIBLE: it is recorded verbatim in
       ``audit.suppressed_peaks`` with its boundary evidence attached.
 
-  Activity runs and merging:
-    * a run starts at each eligible peak and extends outward while adjacent
-      pairs are valid and >= activity_floor_ratio * abs_threshold;
-    * extension stops at invalid pairs (R: nothing spans missing data), at
-      non-contiguous frame numbers (real frame_no gaps), and at confirmed
-      cut-crossing pairs (forced segmentation);
-    * two peaks merge into one candidate only when their runs overlap or are
-      separated by <= merge_gap_frames intervening pairs, EVERY one of which
-      is valid and >= abs_threshold/2 (bridge rule, same spirit as E1b).
+  Activity runs and merging (frozen ruling -- THREE STAGES, THREE FLOORS):
+    * stage 1 peak eligibility   : absolute floor abs_threshold (+ the
+      prominence formula above);
+    * stage 2 run extension      : a run starts at each eligible peak's
+      whole plateau and grows outward ONLY over ACTIVE pairs -- valid,
+      frame-contiguous and >= ACTIVITY FLOOR
+      (abs_threshold * activity_floor_ratio, DEFAULT 0.1; frozen rule,
+      restored after review: index-space refactoring must NEVER change
+      this floor).  A valid pair strictly below that floor is RESTING and
+      stops growth; crossing resting stretches is governed by the
+      deterministic bounded bridge (budget merge_gap_frames) implemented
+      in ExcursionPlanner.extend().  Extension stops at invalid pairs
+      (nothing spans missing data), at non-contiguous frame numbers (real
+      frame_no holes) and at confirmed cut-crossing pairs (forced
+      segmentation);
+    * stage 3 run merging        : two peak-centered runs join into ONE
+      candidate only when they overlap/touch or are separated by
+      <= merge_gap_frames intervening pairs, EVERY one of which is valid
+      and >= abs_threshold/2 (BRIDGE FLOOR, same spirit as E1b).
+      The three floors are deliberately distinct: prominence_ratio scales
+      LOCAL prominence only; abs_threshold/2 is the MERGE bridge floor;
+      neither may be substituted for the other.  A deep-valley split test
+      therefore uses a valley strictly BELOW abs_threshold/2 together with
+      merge_gap_frames small enough to pin the bridge rule itself.
 
   Candidate interval (R2, post-frame semantics):
-    * active pair range [a..b] covers post frames a+1 .. b+1; the half-open
-      event interval is [frame_no(a+1), frame_no(b+1) + 1) for contiguous
-      frame numbers; non-contiguous coverage NEVER collapses into a fake
-      +1 span (the run segments instead);
+    * an ACTIVE pair measures a real change between its pre and post
+      frames, so BOTH endpoints belong to the observed excursion: active
+      pair range [a..b] maps to the half-open frame interval
+      [pairs[a].frame_no, pairs[b].frame_no + 1) -- the FIRST post frame
+      is the left anchor, the LAST post frame stays inside the interval
+      (right-open).  Verified through the REAL frame numbers (never list
+      positions +/- 1); prev_frame_no of the first pair is NOT part of
+      this run's change evidence;
+    * a sub-floor RESTING pair inside a merged burst contributes no change
+      evidence of its own; its pre frame is already covered as the post
+      frame of the preceding pair, so the mapping never loses a boundary
+      frame and never fabricates one across a hole;
+    * non-contiguous coverage NEVER collapses into a fake +1 span (the
+      run segments instead);
     * attribution follows the existing ShotSpan half-open ownership and the
       E1b post-frame rule (a change belongs to the shot owning its post
       frame); validate_event enforces containment inside the shot.
@@ -85,21 +119,33 @@ ALGORITHM_VERSION = "1.0.0"
 
 #: Experiment defaults ONLY -- must be overridden per material via params;
 #: they are echoed into AlgorithmProvenance.params so no magic number is
-#: silently baked into results.
+#: silently baked into results.  ``prominence_max_ratio`` is the single
+#: exception: DEPRECATED / INACTIVE (frozen ruling 1) and stripped from
+#: every ACTIVE parameter set before it reaches provenance.
 DEFAULT_PARAMS: dict[str, Any] = {
     # absolute floor on mean_abs_diff (uint8 units) for peak eligibility
     "abs_threshold": 5.0,
-    # dual-condition prominence (frozen contract, strict >): the plateau
-    # value must exceed BOTH mean(neighbors)*prominence_ratio AND
-    # max(neighbors)*prominence_max_ratio -- the second term keeps a spike
-    # adjacent to an equally strong spike (burst entry/exit pair) eligible
+    # AUTHORITATIVE prominence formula (frozen ruling 1, strict >):
+    #     plateau_value > max(neighbors) * prominence_ratio
+    #   AND                     plateau_value > median(neighbors)
+    # Neighbors exclude the whole plateau and all blocked pairs.  The
+    # median clause compares against the RAW median -- prominence_ratio
+    # scales the MAX clause only.  Equal-strength neighbours therefore
+    # defeat prominence (v > v*r false), which is intended: a constant
+    # translation platform stays peak-free apart from its onset edge.
     "prominence_ratio": 0.5,
-    "prominence_max_ratio": 0.9,
+    # DEPRECATED / INACTIVE (frozen ruling 1): retained only for parameter
+    # compatibility; it does NOT participate in peak selection and must not
+    # be echoed into active provenance params.
+    "prominence_max_ratio": None,
     # fixed neighborhood window (pairs) used for prominence stats
     "window_frames": 3,
-    # run extension continues while value >= activity_floor_ratio*abs_thr
+    # stage-2 ACTIVITY FLOOR ratio (frozen contract, restored after review):
+    # a run grows outward over valid pairs >= abs_threshold * this ratio;
+    # a valid pair strictly below it is RESTING and stops growth.  The
+    # index-space refactoring must never silently change this floor.
     "activity_floor_ratio": 0.1,
-    # max gap between peaks merged into one candidate (bridged runs)
+    # max gap between peaks merged into one candidate (bridge rule, stage 3)
     "merge_gap_frames": 1,
     # measurement coverage_ratio required before any candidate is trusted
     "min_coverage_ratio": 0.9,
@@ -166,113 +212,128 @@ def _plateau_representatives(vals: list[float | None], elig: list[bool],
     return reps
 
 
-def _bridgeable_rest(m: dict[str, Any], lo_lim: int, hi_lim: int,
-                     blocked: set[int], floor: float,
-                     merge_gap_frames: int, *, side: str, edge: int,
-                     ) -> int | None:
-    """Deterministic bounded bridge over a resting stretch (stage 2).
+class ExcursionPlanner:
+    """Frozen stage-2 growth in ONE absolute pair-index space.
 
-    From the run edge ``edge`` looking outward on ``side`` ("left"/"right"),
-    count consecutive VALID but sub-floor pairs.  The stretch is bridgeable
-    only when ALL hold:
-      * length is between 1 and ``merge_gap_frames`` inclusive;
-      * every pair in the stretch is frame-number contiguous with the run;
-      * immediately beyond the stretch there is an ACTIVE pair (valid and
-        >= floor) -- bridging into silence is meaningless and forbidden;
-      * no invalid pair and no confirmed-cut-crossing pair sits inside the
-        stretch (hard stops: those segment, they are never "rest").
-    Returns the index of the active landing pair beyond the stretch, or
-    None when no bridge applies.  Invalid/blocked pairs NEVER consume the
-    rest budget -- they abort the bridge outright.
+    Index-space note (frozen ruling): everything here runs in ONE space --
+    absolute indices into ``measurement["frame_pairs"]``.  Plateau lists,
+    blocked sets, grown runs and active ranges all share it; there is no
+    per-run local numbering anywhere (review: mixed-index defect).
+
+    Growth rules (stage 2, frozen):
+      * a run starts at an eligible plateau (whole flat top) and grows
+        outward over pairs that are valid, frame-contiguous and >= the
+        ACTIVITY FLOOR (abs_threshold * activity_floor_ratio);
+      * a valid pair strictly below the floor is RESTING: growth may cross
+        a resting stretch only within the deterministic budget
+        ``merge_gap_frames`` and only when EVERY skipped pair is valid,
+        frame-contiguous and >= abs_threshold / 2 (the bridge floor --
+        same spirit as E1b; low-but-valid interior may extend one peak's
+        run but must never swallow a deep valley or a hole);
+      * invalid measurements and confirmed-cut-crossing (blocked) pairs
+        are HARD stops: nothing spans missing data or a cut;
+      * non-contiguous real frame numbers stop growth (no faked spans).
+
+    ``active_pair_range()`` returns the pair indices inside a grown run
+    whose measurement is ACTIVE (>= the stage-1 absolute floor).  The R2
+    interval mapping uses ONLY these anchors, so resting boundary pairs
+    never fabricate event edges while still being covered by the grown
+    run's interior.
     """
-    pairs = m["frame_pairs"]
-    step = -1 if side == "left" else 1
 
-    def contig(a: int, b: int) -> bool:
+    def __init__(self, measurement: dict[str, Any], thr: float,
+                 floor: float, merge_gap_frames: int,
+                 blocked: set[int] | None = None):
+        self.pairs = measurement["frame_pairs"]
+        self.n = len(self.pairs)
+        self.thr = float(thr)              # stage-1 absolute floor
+        self.floor = float(floor)          # stage-2 activity floor
+        self.bridge_min = self.thr / 2.0   # stage-3 bridge floor
+        self.mgf = int(merge_gap_frames)
+        self.blocked = set(blocked or ())
+        self.vals = [_pair_value(measurement, i) for i in range(self.n)]
+
+    # ---- predicates -----------------------------------------------------
+    def _fn(self, i: int) -> int:
+        return int(self.pairs[i]["frame_no"])
+
+    def _contig(self, a: int, b: int) -> bool:
         """post frame of pair a is immediately followed by post of pair b."""
-        return 0 <= a < len(pairs) and 0 <= b < len(pairs) \
-            and int(pairs[a]["frame_no"]) + 1 == int(pairs[b]["frame_no"])
+        return 0 <= a < self.n and 0 <= b < self.n \
+            and self._fn(a) + 1 == self._fn(b)
 
-    j = edge + step
-    cnt = 0
-    while lo_lim <= j <= hi_lim:
-        v = _pair_value(m, j)
-        if j in blocked or v is None:
-            return None                      # hard stop, not rest
-        if not contig(j - step, j):
-            return None                      # frame-number hole: never bridge
-        if v >= floor:
-            if cnt == 0 or cnt > merge_gap_frames:
-                return None                  # no rest crossed, or too much
-            return j                         # active landing pair
-        cnt += 1
-        if cnt > merge_gap_frames:
-            return None
-        j += step
-    return None                              # ran off the series
+    def _growable(self, j: int) -> bool:
+        """valid, unblocked, contiguous with previous pair, >= activity floor"""
+        return (0 <= j < self.n and self.vals[j] is not None
+                and j not in self.blocked
+                and self._contig(j - 1, j)
+                and self.vals[j] >= self.floor)
 
+    def _crossable_rest(self, lo: int, hi: int) -> bool:
+        """May growth jump the resting stretch [lo..hi]?  Every skipped pair
+        must be valid, unblocked, frame-contiguous and >= bridge floor;
+        the stretch length must fit the merge_gap_frames budget."""
+        if hi < lo or (hi - lo + 1) > self.mgf:
+            return False
+        for j in range(lo, hi + 1):
+            if self.vals[j] is None or j in self.blocked \
+                    or not self._contig(j - 1, j) \
+                    or self.vals[j] < self.bridge_min:
+                return False
+        return True
 
-def _extend_run(m: dict[str, Any], lo_lim: int, hi_lim: int,
-                floor: float, blocked: set[int], plateau: list[int],
-                merge_gap_frames: int,
-                ) -> tuple[int, int]:
-    """Grow the activity run around the peak's whole plateau (stage 2).
-
-    Frozen E2b semantics -- THREE DISTINCT STAGES, three distinct rules:
-      stage 1 peak eligibility   : abs_threshold (+ prominence);
-      stage 2 run extension      : continue while adjacent pairs are valid,
-        frame-contiguous and >= ACTIVITY FLOOR (abs_threshold *
-        activity_floor_ratio); a valid sub-floor pair is RESTING and stops
-        growth EXCEPT via the deterministic bounded bridge below;
-      stage 3 run merging        : deeper floor (abs_threshold / 2), see
-        merge_motion_runs -- a low-but-valid interior may extend ONE peak's
-        run but must never glue TWO independent peaks across a deep valley.
-
-    Bounded bridge (stage 2): at most ``merge_gap_frames`` consecutive
-    valid resting pairs may be crossed, and only when an active, frame-
-    contiguous pair lies immediately beyond the stretch -- so the entry
-    spike, resting interior and exit spike of ONE burst form one excursion,
-    while two bursts separated by a wider rest plateau stay separate.
-    Hard stops: invalid measurements, confirmed-cut-crossing pairs and
-    frame-number holes (never counted as rest).
-
-    The plateau itself is always part of the run; blocking only stops
-    EXTENSION -- a suppressed cross-cut pair must never silently delete
-    measured evidence from the audit trail.
-    """
-    lo, hi = plateau[0], plateau[-1]
-
-    def active(j: int) -> bool:
-        v = _pair_value(m, j)
-        return v is not None and v >= floor
-
-    # leftward growth
-    while True:
-        if lo - 1 < lo_lim or (lo - 1) in blocked \
-                or _pair_value(m, lo - 1) is None:
+    # ---- stage-2 growth --------------------------------------------------
+    def extend(self, plateau: list[int]) -> tuple[int, int]:
+        """Grow a run outward from a whole plateau.  Returns the inclusive
+        grown pair range (absolute indices)."""
+        lo, hi = plateau[0], plateau[-1]
+        # left side
+        while True:
+            j = lo - 1
+            if self._growable(j):
+                lo = j
+                continue
+            if self.vals[j] is not None and j not in self.blocked \
+                    and self._contig(j - 1, j) and self.vals[j] < self.floor:
+                r = j
+                while r - 1 >= 0 and self.vals[r - 1] is not None \
+                        and self.vals[r - 1] < self.floor \
+                        and (r - 1) not in self.blocked \
+                        and self._contig(r - 2, r - 1):
+                    r -= 1
+                if self._growable(r - 1) \
+                        and self._crossable_rest(r, lo - 1) \
+                        and (lo - r) <= self.mgf:
+                    lo = r - 1
+                    continue
             break
-        if active(lo - 1):
-            lo -= 1
-            continue
-        land = _bridgeable_rest(m, lo_lim, hi_lim, blocked, floor,
-                                merge_gap_frames, side="left", edge=lo)
-        if land is None:
+        # right side
+        while True:
+            j = hi + 1
+            if self._growable(j):
+                hi = j
+                continue
+            if j < self.n and self.vals[j] is not None and j not in self.blocked \
+                    and self._contig(j - 1, j) and self.vals[j] < self.floor:
+                r = j
+                while r + 1 < self.n and self.vals[r + 1] is not None \
+                        and self.vals[r + 1] < self.floor \
+                        and (r + 1) not in self.blocked \
+                        and self._contig(r, r + 1):
+                    r += 1
+                if self._growable(r + 1) \
+                        and self._crossable_rest(hi + 1, r) \
+                        and (r - hi) <= self.mgf:
+                    hi = r + 1
+                    continue
             break
-        lo = land
-    # rightward growth (symmetric)
-    while True:
-        if hi + 1 > hi_lim or (hi + 1) in blocked \
-                or _pair_value(m, hi + 1) is None:
-            break
-        if active(hi + 1):
-            hi += 1
-            continue
-        land = _bridgeable_rest(m, lo_lim, hi_lim, blocked, floor,
-                                merge_gap_frames, side="right", edge=hi)
-        if land is None:
-            break
-        hi = land
-    return lo, hi
+        return lo, hi
+
+    def active_pair_range(self, start: int, end: int) -> list[int]:
+        """Absolute pair indices inside grown run [start..end] carrying an
+        ACTIVE measurement (>= stage-1 absolute floor)."""
+        return [j for j in range(start, end + 1)
+                if self.vals[j] is not None and self.vals[j] >= self.thr]
 
 
 class _Segmentation(Exception):
@@ -281,31 +342,41 @@ class _Segmentation(Exception):
     half-open span across a hole."""
 
 
-def _contiguous_post_interval(pairs: list[dict[str, Any]], a: int, b: int,
+def _contiguous_post_interval(pairs: list[dict[str, Any]], idxs: list[int],
                               ) -> tuple[int, int]:
-    """R2 mapping: active pair range [a..b] -> post frames a+1..b+1.
+    """R2 mapping: active pair indices -> half-open frame interval.
 
-    Pair i connects (prev_i, cur_i); the post frames covered by the whole
-    range are prev_{a} (= frame a) through cur_{b} (= frame b+1), which is
-    exactly pairs[a]["prev_frame_no"] .. pairs[b]["frame_no"].  The half-open
-    interval therefore ends at pairs[b]["frame_no"] + 1 so that the LAST
-    post frame stays INSIDE [start, end).  Contiguity of the underlying
-    frame numbers is verified; a hole forces segmentation, never a faked
-    span.
+    The covered frame set is the POST frames of every ACTIVE pair: the
+    interval starts at ``pairs[idxs[0]]["frame_no"]`` (the FIRST post
+    frame; prev_frame_no of that pair is only the pre side of the change
+    and is NOT part of this run's evidence) and ends right-open after the
+    LAST post frame, ``pairs[idxs[-1]]["frame_no"] + 1``, so both boundary
+    post frames stay inside [start, end).
+
+    Coverage rule (frozen): every frame strictly between the first and
+    last post frame must be covered by SOME valid pair in the grown run
+    (its post frame lies within the run span).  A frame whose adjacent
+    measurements are all invalid/absent (an undecodable hole) breaks
+    coverage -- the caller segments instead of faking a span.
     """
-    # The covered frame set is the POST frames of every pair in [a..b]:
-    # pairs[a].frame_no .. pairs[b].frame_no.  prev_frame_no is only the
-    # left anchor and is NOT part of the observed change evidence -- the
-    # pre frame is static with respect to this run (frozen R2 semantics).
-    start_fn = int(pairs[a]["frame_no"])
-    end_fn = int(pairs[b]["frame_no"]) + 1
-    cur = start_fn
-    for j in range(a, b + 1):
-        if int(pairs[j]["frame_no"]) != cur:
+    if not idxs:
+        raise _Segmentation("empty active range")
+    lo_i, hi_i = idxs[0], idxs[-1]
+    start_fn = int(pairs[lo_i]["frame_no"])
+    end_fn = int(pairs[hi_i]["frame_no"]) + 1
+    # contiguity of the ACTIVE pairs themselves (no index holes inside
+    # the anchor stretch) plus real frame-number continuity
+    for x, y in zip(idxs, idxs[1:]):
+        if int(pairs[y]["frame_no"]) != int(pairs[x]["frame_no"]) + 1:
             raise _Segmentation(
-                f"pair {j} post frame {pairs[j]['frame_no']} breaks "
-                f"contiguity at {cur}")
-        cur += 1
+                f"active pair {y} post frame {pairs[y]['frame_no']} breaks "
+                f"contiguity after {pairs[x]['frame_no']}")
+    # every interior frame must be covered by a valid pair of the run
+    covered = {int(pairs[j]["frame_no"])
+               for j in range(lo_i, hi_i + 1) if pairs[j]["valid"]}
+    for fn in range(start_fn, end_fn):
+        if fn not in covered:
+            raise _Segmentation(f"frame {fn} has no valid covering pair")
     return start_fn, end_fn
 
 
@@ -313,20 +384,28 @@ def _contiguous_post_interval(pairs: list[dict[str, Any]], a: int, b: int,
 # stage 1: screening + prominence (pure, testable in isolation)
 # ---------------------------------------------------------------------------
 
-def _plateau_groups(vals: list[float | None], elig: list[bool],
-                    ) -> list[list[int]]:
+def _plateau_groups(pairs: list[dict[str, Any]], vals: list[float | None],
+                    elig: list[bool]) -> list[list[int]]:
     """Group eligible indices into maximal plateaus: CONSECUTIVE indices
     (no ineligible index in between) sharing one identical value.
 
     Non-adjacent equal values -- e.g. the entry and exit spikes of a
     symmetric burst separated by resting pairs -- are NOT one flat top;
     "flat top" means spatially contiguous samples.  Ascending order.
+
+    A plateau NEVER extends across a frame-number hole: pair i and pair
+    i+1 belong to one flat top only when they are adjacent in the series
+    AND their post frames are consecutive REAL frame numbers.  Two equal
+    values measured around a missing/undecodable frame are distinct
+    physical observations, not one flat top (frozen R2 contiguity).
     """
     groups: list[list[int]] = []
     cur: list[int] = []
     prev_ok = False
     for i, ok in enumerate(elig):
-        if ok and prev_ok and vals[i] == vals[cur[-1]]:
+        if (ok and prev_ok and vals[i] == vals[cur[-1]]
+                and int(pairs[i]["frame_no"])
+                == int(pairs[cur[-1]]["frame_no"]) + 1):
             cur.append(i)
         else:
             if cur:
@@ -350,9 +429,12 @@ def find_motion_peaks(measurement: dict[str, Any], *,
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
+    # frozen ruling 1: prominence_max_ratio is DEPRECATED / INACTIVE -- it
+    # never participates in peak selection, so it is stripped from the
+    # ACTIVE parameter set (provenance below echoes the active set only).
+    p.pop("prominence_max_ratio", None)
     thr = float(p["abs_threshold"])
     prom = float(p["prominence_ratio"])
-    prom_max = float(p["prominence_max_ratio"])
     win = int(p["window_frames"])
 
     pairs = measurement["frame_pairs"]
@@ -361,7 +443,6 @@ def find_motion_peaks(measurement: dict[str, Any], *,
     blocked = set(blocked_pairs or ())
 
     suppressed: list[dict[str, Any]] = []
-    over_thr: list[bool] = []
     for i in range(n):
         v = vals[i]
         if v is not None and i in blocked and v >= thr:
@@ -374,21 +455,31 @@ def find_motion_peaks(measurement: dict[str, Any], *,
                 "max_abs_diff": pairs[i]["max_abs_diff"],
                 "changed_pixel_ratio": pairs[i]["changed_pixel_ratio"],
             })
-        over_thr.append(v is not None and i not in blocked and v >= thr)
 
-    # R1 (review condition 1): the PLATEAU as a whole participates in peak
-    # eligibility -- the representative position never changes the verdict.
-    # Neighbors exclude every member of the candidate plateau (not just the
-    # representative) plus all blocked pairs; both prominence conditions are
-    # evaluated on that plateau-wide neighborhood.
-    prelim_groups = _plateau_groups(vals, over_thr)
+    # R1 (frozen ruling 4 -- WHOLE-PLATEAU GROUPING): candidates are formed
+    # FIRST as maximal plateaus of CONSECUTIVE, equal-valued, VALID pairs;
+    # only THEN is the whole plateau judged for eligibility as one unit.
+    # Grouping by per-point over-threshold flags first is forbidden: it
+    # would slice one flat top into several candidates.  A blocked pair
+    # (confirmed-cut-crossing) breaks the flat top because it contributes
+    # NO motion evidence to either side (R3); a pair that merely lacks PTS
+    # keeps its valid measurement and NEVER splits a plateau (R4).
+    # Neighbors exclude every member of the candidate's own plateau plus
+    # all blocked pairs; both prominence clauses use the SINGLE frozen
+    # formula (ruling 1).
+    cand = [v is not None and i not in blocked
+            for i, v in enumerate(vals)]
+    prelim_groups = _plateau_groups(pairs, vals, cand)
     elig = [False] * n
     infos: dict[int, dict[str, Any]] = {}
-    for g in prelim_groups:
-        gi, gj = set(g), None
-        pv = vals[g[0]]
-        lo = max(0, min(g) - win)
-        hi = min(n - 1, max(g) + win)
+    plateau_by_idx: dict[int, list[int]] = {}
+    for sg in prelim_groups:
+        gi = set(sg)
+        pv = vals[sg[0]]
+        if pv < thr:                       # absolute floor on the plateau
+            continue
+        lo = max(0, min(sg) - win)
+        hi = min(n - 1, max(sg) + win)
         neigh = [vals[j] for j in range(lo, hi + 1)
                  if j not in gi and vals[j] is not None and j not in blocked]
         if not neigh:
@@ -399,26 +490,34 @@ def find_motion_peaks(measurement: dict[str, Any], *,
         mx = max(neigh)
         sm = sorted(neigh)
         med = sm[len(sm) // 2] if len(sm) % 2 else (sm[len(sm) // 2 - 1] + sm[len(sm) // 2]) / 2.0
-        # dual condition: plateau value must exceed BOTH the window mean
-        # scaled by prominence_ratio AND the strongest neighbor scaled by
-        # prominence_max_ratio (strict >, frozen contract).
-        if pv > med * prom and pv > mx * prom_max:
-            for j in g:
+        # single frozen prominence formula (frozen ruling 1, strict >):
+        #     v > max(N) * prominence_ratio   AND   v > median(N)
+        # The MAX clause carries the ratio; the MEDIAN clause is a raw
+        # majority floor WITHOUT the ratio -- two different statistics,
+        # two different roles.  Equal-strength neighbours defeat prominence
+        # through the max clause (v > v*r is false for r < 1), which is
+        # intended: a constant-translation platform stays peak-free apart
+        # from its onset edge.
+        if pv > mx * prom and pv > med:
+            rep = sg[0] + (len(sg) - 1) // 2   # LEFT-MIDDLE rule (R1)
+            for j in sg:
                 elig[j] = True
-                infos[j] = {"neighbor_max": _r(mx), "neighbor_median": _r(med),
+                plateau_by_idx[j] = sg
+                infos[j] = {"neighbor_max": _r(mx),
+                            "neighbor_median": _r(med),
                             "window": {"start": lo, "end": hi},
                             "valid_samples": len(neigh),
                             # edge evidence: one side of the plateau has
                             # no observable pairs at all (series boundary)
-                            "single_sided": (min(g) - win < 0
-                                             or max(g) + win > n - 1)}
+                            "single_sided": (min(sg) - win < 0
+                                             or max(sg) + win > n - 1)}
 
-    reps = [g[0] + (len(g) - 1) // 2 for g in _plateau_groups(vals, elig)]
-    plateau_by_rep: dict[int, list[int]] = {
-        g[0] + (len(g) - 1) // 2: g for g in _plateau_groups(vals, elig)}
+    reps = sorted({plateau_by_idx[j][0]
+                   + (len(plateau_by_idx[j]) - 1) // 2
+                   for j in range(n) if elig[j]})
     peaks: list[dict[str, Any]] = []
     for i in reps:
-        plateau = plateau_by_rep[i]
+        plateau = plateau_by_idx[i]
         info = infos[i]
         peaks.append({
             "pair_index": i,
@@ -453,8 +552,7 @@ def find_motion_peaks(measurement: dict[str, Any], *,
 # stage 2: deterministic merging of peak-centered runs
 # ---------------------------------------------------------------------------
 
-def merge_motion_runs(peaks: list[dict[str, Any]],
-                      runs: list[tuple[int, int]],
+def merge_motion_runs(runs: list[tuple[int, int]],
                       measurement: dict[str, Any],
                       threshold: float,
                       merge_gap_frames: int,
@@ -534,6 +632,9 @@ def extract_peak_motion_events(
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
+    # frozen ruling 1: the deprecated prominence_max_ratio never joins the
+    # ACTIVE parameter set echoed into provenance / measurement_provenance.
+    p.pop("prominence_max_ratio", None)
 
     pairs = measurement["frame_pairs"]
     fn_to_idx = {int(pr["frame_no"]): i for i, pr in enumerate(pairs)}
@@ -596,32 +697,20 @@ def extract_peak_motion_events(
 
     floor = float(p["abs_threshold"]) * float(p["activity_floor_ratio"])
     mgf = int(p["merge_gap_frames"])
-    n = len(pairs)
-    # one activity run per peak plateau, extended symmetrically outward.
-    # Run growth is bounded by the ACTIVITY FLOOR (abs_threshold *
-    # activity_floor_ratio): a valid pair strictly below the floor is a
-    # resting frame pair and stops growth -- otherwise every burst would
-    # bridge through zeros and swallow the whole shot.  Low-but-valid
-    # pairs at/above the floor may be crossed within the deterministic
-    # gap budget (see _extend_run).  Invalid measurements and confirmed-
-    # cut-crossing pairs are hard stops.
-    # NOTE: _shot_of / _clip_to_shot are nested closures created strictly
-    # before any use (review of the earlier UnboundLocalError incident).
+    # one activity run per peak plateau, grown by the ExcursionPlanner in
+    # ONE absolute pair-index space (stage-2 frozen rules: activity floor
+    # abs_threshold * activity_floor_ratio; resting stretches crossable
+    # only within the merge_gap_frames budget AND only when every skipped
+    # pair is valid and >= abs_threshold/2; invalid measurements and
+    # confirmed-cut-crossing pairs are hard stops).
+    planner = ExcursionPlanner(measurement, thr_abs, floor, mgf,
+                               blocked=blocked)
+
     def _shot_of(fn: int) -> ShotSpan | None:
         for s in shots:
             if s.owns_frame(fn):
                 return s
         return None
-
-    def _clip_to_shot(lo: int, hi: int) -> tuple[int, int]:
-        """Never let a grown run cross a confirmed hard cut: the crossing
-        pair is excluded and the side keeps its own evidence (post-frame
-        attribution)."""
-        while lo in blocked and lo < hi:
-            lo += 1
-        while hi in blocked and hi > lo:
-            hi -= 1
-        return lo, hi
 
     def _segment_runs(runs_in: list[tuple[int, int]]) -> list[tuple[int, int]]:
         """Split every grown run at hard-stop pairs (confirmed-cut-crossing
@@ -643,17 +732,52 @@ def extract_peak_motion_events(
                 out.append((cur, hi))
         return out
 
-    runs: list[tuple[int, int]] = []
-    for pk in peaks:
-        lo, hi = _extend_run(measurement, 0, n - 1, floor, blocked,
-                             pk["plateau_indices"], mgf)
-        # clip against shot ownership bounds too: a run may not grow past
-        # the series edges owned by any single shot context; the explicit
-        # per-shot segmentation below still enforces ShotSpan ownership.
-        runs.extend(_segment_runs([_clip_to_shot(lo, hi)]))
-
-    groups = merge_motion_runs(peaks, runs, measurement,
-                               float(p["abs_threshold"]), mgf,
+    # ---- stage 2: grow one run per peak, then split at hard stops -------
+    # Excursion anchoring (frozen): a grown run is ANCHORED at its own
+    # plateau; it may absorb an equal-valued symmetric spike beyond a
+    # resting interior (entry+exit of ONE burst = one candidate) but a
+    # FOREIGN plateau (different value) always stays a separate anchor --
+    # two independent bursts must not collapse through their shared rest.
+    # Runs live in ONE absolute pair-index space; every downstream lookup
+    # resolves a peak through ITS OWN run list (never peaks.index()
+    # reverse lookups or mixed index spaces -- review: mixed-index defect).
+    flat: list[tuple[int, int]] = []          # unique grown/merged runs
+    run_peaks: dict[tuple[int, int], list[int]] = {}   # run -> peak indices
+    peak_run_seg: dict[int, list[tuple[int, int]]] = {}  # peak -> segments
+    for pi, pk in enumerate(peaks):
+        lo, hi = planner.extend(pk["plateau_indices"])
+        # absorb already-planned runs whose only active pairs form an
+        # equal-valued plateau of THIS peak and fit inside the grown span
+        for (rlo, rhi), rpks in list(run_peaks.items()):
+            if rlo >= lo and rhi <= hi and rpks:
+                other = peaks[rpks[0]]
+                if other["value"] == pk["value"]:
+                    lo, hi = min(lo, rlo), max(hi, rhi)
+        key = (lo, hi)
+        absorbed = [k for k, v in run_peaks.items()
+                    if k != key and lo <= k[0] and k[1] <= hi]
+        merged_pks = sorted({pi} | {q for k in absorbed for q in run_peaks[k]}
+                            | {q for k, v in run_peaks.items()
+                               if k == key for q in v})
+        for k in absorbed:
+            del run_peaks[k]
+            flat.remove(k)
+        run_peaks[key] = merged_pks
+        if key not in flat:
+            flat.append(key)
+    flat_sorted = sorted(flat)
+    # recompute per-peak segment lists AFTER merging (hard stops split each
+    # final run; every peak of a run maps through that run's own segments)
+    seg_of_run: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for key in flat_sorted:
+        seg_of_run[key] = _segment_runs([key])
+    for pi in range(len(peaks)):
+        segs: list[tuple[int, int]] = []
+        for key, rpks in run_peaks.items():
+            if pi in rpks:
+                segs.extend(seg_of_run[key])
+        peak_run_seg[pi] = sorted(segs)
+    groups = merge_motion_runs(flat_sorted, measurement, thr_abs, mgf,
                                blocked_pairs=blocked)
 
     events: list[dict[str, Any]] = []
@@ -682,15 +806,18 @@ def extract_peak_motion_events(
         }
 
     def _emit(sh: ShotSpan, seg_peaks: list[dict[str, Any]],
-              lo: int, hi: int, start_fn: int, end_fn: int) -> None:
+              lo: int, hi: int, start_fn: int, end_fn: int,
+              merged_runs: list[list[int]]) -> None:
         """Assemble one CANDIDATE event for a segmented, attributed run."""
-        # ---- R4 (frozen ruling a): the STRONGEST peak is chosen by value
-        # with the deterministic tie rule FIRST; if that peak lacks an
-        # authoritative PTS the candidate is withheld -- never silently
-        # re-anchored to a weaker peak.  A weaker peak missing PTS does NOT
-        # veto the event, but must stay visible in the peak evidence (its
-        # pts_s=None) and is recorded in the audit trail.
-        peak = max(seg_peaks, key=lambda pk: (pk["value"], pk["pair_index"]))
+        # ---- R4 (frozen ruling 3): the STRONGEST peak is chosen by value
+        # FIRST; ties are broken deterministically toward the EARLIEST pair
+        # index (entry-peak anchor).  Only AFTER the peak is selected is its
+        # PTS checked: if that peak lacks an authoritative PTS the candidate
+        # is withheld -- never silently re-anchored to a weaker peak.  A
+        # weaker peak missing PTS does NOT veto the event, but must stay
+        # visible in the peak evidence (its pts_s=None) and is recorded in
+        # the audit trail.
+        peak = min(seg_peaks, key=lambda pk: (-pk["value"], pk["pair_index"]))
         weaker_no_pts = [pk for pk in seg_peaks
                          if pk is not peak and pk["pts_s"] is None]
 
@@ -819,45 +946,53 @@ def extract_peak_motion_events(
         events.append(ev.to_dict())
 
     for group in groups:
-        g_runs = [runs[k] for k in group]
-        # peaks whose plateau lies inside any run of the group (run index
-        # space == peak index space, so `k` is directly a peak index)
-        g_peaks = [pk for k in group for pk in [peaks[k]]
-                   if any(lo <= j <= hi for lo, hi in g_runs
-                          for j in pk["plateau_indices"])]
+        g_runs = [flat_sorted[k] for k in group]
+        gs_lo = min(a for a, _ in g_runs)
+        gs_hi = max(b for _, b in g_runs)
+        # peaks whose grown run participates in this group -- resolved via
+        # the explicit peak -> segment maps built in the SAME absolute pair
+        # index space (never a reverse peaks.index() lookup against merged
+        # runs; review: mixed-index defect).  A peak joins when ANY of its
+        # post-hard-stop segments overlaps the group span.
+        g_peaks = [pk for pi, pk in enumerate(peaks)
+                   if any(not (b < gs_lo or a > gs_hi)
+                          for a, b in peak_run_seg[pi])]
         if not g_peaks:
             continue
 
         # ---- segmentation: any blocked (confirmed-cut-crossing) pair OR
         # any unmeasurable (invalid) pair between two runs forces a split;
         # events may never span a confirmed cut and never silently span
-        # missing data.  A blocked/invalid pair INSIDE one run cannot
-        # happen by construction (_extend_run refuses to grow through it).
-        # Collect every hard-stop pair (confirmed-cut crossing or
-        # unmeasurable) inside the group's total span; each one forces a
-        # split of the candidate interval -- never a silent span across it.
-        g_lo = min(lo for lo, _ in g_runs)
-        g_hi = max(hi for _, hi in g_runs)
-        stops = sorted(j for j in range(g_lo, g_hi + 1)
+        # missing data.  Collect every hard-stop pair inside the group's
+        # total span; each one forces a split of the candidate interval --
+        # never a silent span across it.
+        stops = sorted(j for j in range(gs_lo, gs_hi + 1)
                        if j in blocked or _pair_value(measurement, j) is None)
         seg_bounds: list[tuple[int, int]] = []  # (lo_pair, hi_pair) inclusive
-        cur_lo = g_lo
+        cur_lo = gs_lo
         for s in stops:
             if s > cur_lo:
                 seg_bounds.append((cur_lo, s - 1))
             cur_lo = s + 1
-        if cur_lo <= g_hi:
-            seg_bounds.append((cur_lo, g_hi))
+        if cur_lo <= gs_hi:
+            seg_bounds.append((cur_lo, gs_hi))
 
         for lo, hi in seg_bounds:
+            # R2 anchors: ACTIVE pairs (>= stage-1 absolute floor) inside
+            # this segment.  Resting interior pairs are covered by the
+            # interval but never fabricate an event edge on their own.
+            anchors = planner.active_pair_range(lo, hi)
+            anchors = [j for j in anchors if j not in blocked]
+            if not anchors:
+                continue
             try:
-                start_fn, end_fn = _contiguous_post_interval(pairs, lo, hi)
+                start_fn, end_fn = _contiguous_post_interval(pairs, anchors)
             except _Segmentation:
                 extra_gaps.append({
                     "reason": "decode_misalignment",
                     "frame_range": {"domain": "frame_no",
-                                    "start": pairs[lo + 1]["frame_no"],
-                                    "end": pairs[hi]["frame_no"] + 1},
+                                    "start": pairs[anchors[0]]["frame_no"],
+                                    "end": pairs[anchors[-1]]["frame_no"] + 1},
                     "detail": "active pairs do not cover a contiguous frame-number "
                               "range; candidate segmented instead of faked",
                 })
@@ -890,15 +1025,14 @@ def extract_peak_motion_events(
             # per-peak sub-runs actually covered by THIS segment -- the
             # frozen E2b merge evidence: several peak-centered runs joined
             # into one candidate interval without losing their identity.
-            # peak-centered sub-runs whose PLATEAU lies inside THIS segment
             merged_runs = []
             for pk in seg_peaks:
-                rlo, rhi = runs[peaks.index(pk)]
-                mlo, mhi = max(rlo, lo), min(rhi, hi)
-                if mlo <= mhi:
-                    merged_runs.append([mlo, mhi])
+                for rlo, rhi in peak_run_seg[peaks.index(pk)]:
+                    mlo, mhi = max(rlo, lo), min(rhi, hi)
+                    if mlo <= mhi:
+                        merged_runs.append([mlo, mhi])
             merged_runs.sort()
-            _emit(sh, seg_peaks, lo, hi, start_fn, end_fn)
+            _emit(sh, seg_peaks, lo, hi, start_fn, end_fn, merged_runs)
 
     # deterministic event-id order: by interval start, then end, then shot
     events.sort(key=lambda e: (e["interval_frames"]["start"],
